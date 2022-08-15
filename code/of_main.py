@@ -6,6 +6,7 @@ Created on Tue May 24 10:20:27 2022
 @author: xuyang
 """
 
+######OF alignment for time series images, GST data as example.
 from matplotlib import pyplot as plt
 import numpy as np
 import glob,os
