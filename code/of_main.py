@@ -37,7 +37,8 @@ for ii in range(tot):
     print(filelist[ii])
     icube[ii,:,:]=im#[250:1749,250:1749]
     
-ncube=tools.cubealign(icube.copy(),wd=250,winsize=31)
+ncube=tools.cubealign(icube.copy(),wd=250,winsize=31)#To align the images in a time series, use this command.\
+#Please check the of_tools for the comments and explanations
 ncube=ncube.astype(np.single)
 tcube=[]
 fn=[]
