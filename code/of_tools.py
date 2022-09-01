@@ -7,6 +7,11 @@ Created on Tue May 24 10:21:36 2022
 """
 
 from skimage.transform import warp, SimilarityTransform,rotate
+from sklearn.linear_model import RANSACRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import PolynomialFeatures
+import scipy.fftpack as fft
+from scipy.stats import pearsonr as pr
 import numpy as np
 import cv2
 import glob
@@ -234,3 +239,152 @@ def mode_model(data, residual_threshold=5):
     r=np.median(s[D,:],axis=0) #calculate the mean displacement for the effective points 
     return -r,D   
 
+def ransacfit(x,y,deg=2,r_t=3,center=0,debug=0): #Fit with RANSCA
+
+    ran=RANSACRegressor(LinearRegression(),random_state=0,
+                        max_trials=100,
+                        min_samples=3,
+                        residual_threshold=r_t
+                        )
+    x=x.reshape(-1,1)
+    y=y.reshape(-1,1)
+    quadratic = PolynomialFeatures(degree=deg)
+
+    x2 = quadratic.fit_transform(x)
+
+
+    model=ran.fit(x2,y)
+    Y=model.predict(x2)
+    score=pr(y.flatten().astype('float32'),Y.flatten())[0]
+    D=model.inlier_mask_
+    if debug==1: print(D.sum(),x.shape[0],round(D.sum()/x.shape[0],3),(Y[D]-y[D]).mean(),(Y[D]-y[D]).std())
+    xc,yc=0,0
+    if center==1:
+        p1=np.polyfit(x[D,0],y[D,0],deg)
+    
+        if deg==2:
+            a,b,c=p1
+            xc=-b/(2*a)
+            yc=(4*a*c-b*b+1)/(4*a)
+#            print(xc,yc)
+        else:
+            xc=0
+            yc=0
+        xc,yc,score=fitcircle(x[D,0],y[D,0],xc,yc)    
+      
+    return Y ,model,round(score,3),xc,yc
+
+def fitcircle(x,y,xc,yc):
+
+    from scipy  import optimize   
+    def calc_R(xc, yc):
+        """ calculate the distance of each 2D points from the center (xc, yc) """
+        return np.sqrt((x-xc)**2 + (y-yc)**2)
+    
+    def f_2(c):
+        global Rsun
+        """ calculate the algebraic distance between the data points and the mean circle centered at c=(xc, yc) """
+        Ri = calc_R(*c)
+        return Ri -Rsun# Ri.mean()
+    
+    center_estimate = xc, yc
+    center_2, ier = optimize.leastsq(f_2, center_estimate)
+    
+    xc_2, yc_2 = center_2
+    yf=np.sqrt(Rsun**2-(x-xc_2)**2)+yc_2
+
+    score=pr(y,yf)[0]
+
+#    print(xc_2,yc_2,score)
+    return xc_2,yc_2,score
+
+def fit_dxy(x,xxc,yyc,debug=0):
+
+    jump=0 #Threshold for vibrations in radius direction  
+    if jump>0:
+#        dy=fix_yyc(yyc,G=jump)
+        dy=yyc
+    else:
+#       x=np.array(range(yyc.shape[0]))
+        dy=ransacfit(x,yyc,deg=2,r_t=5,debug=debug)[0]
+        dx=ransacfit(x,xxc,deg=2,r_t=5,debug=debug)[0]
+
+    return dx,dy
+
+def xcorrcenter(standimage, compimage, R0=2, flag=0):
+    # flag==1 for FFT standimage 
+    try:
+        M, N = standimage.shape
+
+        standimage = zscore2(standimage)
+        s = fft.fft2(standimage)
+
+        compimage = zscore2(compimage)
+        c = np.fft.ifft2(compimage)
+
+        sc = s * c
+        im = np.abs(fft.fftshift(fft.ifft2(sc)))  # /(M*N-1);%./(1+w1.^2);
+        cor = im.max()
+        if cor == 0:
+            return 0, 0, 0
+
+        M0, N0 = np.where(im == cor)
+        m, n = M0[0], N0[0]
+
+        if flag:
+            m -= M / 2
+            n -= N / 2
+            # odd or even
+            if np.mod(M, 2): m += 0.5
+            if np.mod(N, 2): n += 0.5
+
+            return m, n, cor
+        
+        immin = im[(m - R0):(m + R0 + 1), (n - R0):(n + R0 + 1)].min()
+        im = np.maximum(im - immin, 0)
+        x, y = np.mgrid[:M, :N]
+        area = im.sum()
+        m = (np.double(im) * x).sum() / area
+        n = (np.double(im) * y).sum() / area
+        m -= M / 2
+        n -= N / 2
+        if np.mod(M, 2): m += 0.5
+        if np.mod(N, 2): n += 0.5
+    except:
+        print('Err in align_Subpix routine!')
+        m, n, cor = 0, 0, 0
+    return m, n, cor
+
+def all_align(im,align,channels,target=0):  #Multiband co-alignment
+
+    M=[]
+    xy=[]
+    for k in range(len(align)):
+        L=np.zeros(channels)
+        n,m=align[k]
+        L[n]=1
+        L[m]=-1
+       
+        im1=im[m]
+        im2=im[n]
+        d,model,flag,flow=align_opflow(im1,im2,winsize=21,step=2,r_t=2,arrow=0)
+        xy.append(d*flag)
+        M.append(L*flag)
+        print(n,'->',m)
+    
+    xy=np.array(xy)
+    
+    #######Least square solution
+    M=np.array(M)
+    M[:,target]=0
+
+    tmp = np.linalg.lstsq(M,xy,rcond=None )
+    x=tmp[0]
+
+    print('\033[7;31m RES: \033[0m  ',np.abs(np.dot(M,x)-xy).max(axis=0),np.abs(np.dot(M,x)-xy).mean(axis=0))
+    for i in range(1,channels):
+        im[i]=immove2(im[i],-x[i,0],-x[i,1])
+#    im[2]=immove2(im[2],-x[2,0],-x[2,1])
+ 
+    im=np.array(im)
+    return im
